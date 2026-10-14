@@ -1,7 +1,7 @@
 /* SPEY//AUDIO service worker: caches the app shell so it opens offline.
    Audio files live in IndexedDB (not here). */
-const CACHE = 'spey-audio-v1';
-const ASSETS = ['./', './index.html', './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
+const CACHE = 'spey-audio-v3';
+const ASSETS = ['./', './index.html', './style.css', './app.js', './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
