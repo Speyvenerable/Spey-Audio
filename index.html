@@ -58,7 +58,7 @@
         <p class="note">
           Paste a <b>direct audio link</b> (.mp3 .m4a .ogg .wav .flac...). Files are stored inside this browser and play with <b>no internet</b>.
           Cover art and lyrics inside the file are picked up automatically. <b>Tap a song</b> to open its music box with the cover and lyrics.
-          Links from <b>YouTube, Spotify, SoundCloud</b> and similar platforms can't be downloaded by a browser, so they're kept as online-only bookmarks. You can also drop audio files onto this panel.
+          <b>YouTube and Spotify</b> links can't become offline audio (their terms and copy protection don't allow it, and a browser can't do it anyway). They're saved as <b>streams</b> that play inside the music box while you're online. Other platform links (SoundCloud, Apple Music...) are kept as online bookmarks. You can also drop audio files onto this panel.
         </p>
         <details>
           <summary>SETTINGS</summary>
@@ -93,7 +93,7 @@
           <li>Come back here and press <b>LOAD FILES</b>. This is the most reliable way, and the cover art and lyrics inside the file come with it.</li>
           <li>To save by URL instead: long-press (or right-click) the download button, choose <b>Copy link address</b>, and paste it into AUDIO URL. The link must point straight to the audio file.</li>
         </ol>
-        <p class="note">If a site refuses the URL save (CORS), use LOAD FILES. Only keep music you have the right to use. Streaming links (YouTube, Spotify...) can't be turned into audio files here.</p>
+        <p class="note">If a site refuses the URL save (CORS), use LOAD FILES. Only keep music you have the right to use. YouTube and Spotify links can't become offline audio files, but you can save them as online streams.</p>
       </section>
     </div>
 
@@ -124,9 +124,13 @@
       </div>
     </div>
     <div class="lyr-wrap">
-      <div class="lh">// LYRICS <span id="lsrc"></span></div>
+      <div class="lh"><em id="lhTitle">// LYRICS</em><span id="lsrc"></span></div>
       <div class="lstat" id="lstat" aria-live="polite"></div>
       <div class="lyr" id="lyr" tabindex="0"></div>
+      <div id="embed" hidden>
+        <div id="embedHost"></div>
+        <p class="note">This is an online stream: it needs internet and can't be saved for offline use. It keeps playing if you close this screen; tap the song in the player bar to come back. Spotify may only play a 30-second preview unless you are logged in to Spotify in this browser. <a id="embedOpen" href="#" target="_blank" rel="noopener noreferrer">Open the original</a></p>
+      </div>
       <form class="edit" id="editForm" hidden autocomplete="off">
         <div class="two">
           <div class="field"><label class="l" for="eTitle">TITLE</label><input type="text" id="eTitle"></div>

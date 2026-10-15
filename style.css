@@ -260,3 +260,9 @@ input[type=range]::-moz-range-thumb{width:10px;height:16px;background:var(--mag)
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important;transition:none!important}
 }
+
+/* streams (YouTube / Spotify embeds) */
+.lh em{font-style:normal}
+#embed{flex:1;min-height:0;overflow-y:auto;margin-top:8px}
+#embedHost iframe{display:block;width:100%;border:1px solid #20304f;background:#000}
+#embedHost iframe.youtube{aspect-ratio:16/9;height:auto}

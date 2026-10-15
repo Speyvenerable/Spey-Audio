@@ -52,7 +52,7 @@ async function removeTrack(id){
 
 /* ---------- state ---------- */
 let tracks=[],queue=[],cur=null,objUrl=null,shuffle=false,repeat='off',busy=false,busyFind=false;
-let boxOpen=false,lyLines=[],lyEls=[],lyActive=-1,userScroll=0,editCover;
+let boxOpen=false,lyLines=[],lyEls=[],lyActive=-1,userScroll=0,editCover,embedFor=null;
 const audio=$('#audio');
 const curTrack=()=>tracks.find(x=>x.id===cur)||null;
 
@@ -460,9 +460,80 @@ function paintArt(node,t){
   node.classList.remove('has');
   if(!t){node.style.background='#0b0d16';return;}
   const p=PAL[hash((t.title||'')+(t.artist||''))%PAL.length];
-  node.style.background='linear-gradient(135deg,'+p[0]+','+p[1]+')';
+  const g='linear-gradient(135deg,'+p[0]+','+p[1]+')';
+  if(t.coverRemote){node.classList.add('has');node.style.background='url("'+t.coverRemote+'") center/cover no-repeat, '+g;return;}
+  node.style.background=g;
 }
 function makeArt(cls,t){const d=el('div','art '+cls);d.innerHTML=NOTE;paintArt(d,t);return d;}
+
+/* ---------- YouTube / Spotify: official embedded players (online only) ---------- */
+function parseEmbed(u){
+  const h=u.hostname.toLowerCase().replace(/^www\./,'');
+  if(h==='youtu.be'){
+    const id=u.pathname.slice(1).split('/')[0];
+    if(/^[\w-]{11}$/.test(id))return {kind:'youtube',id};
+  }
+  if(/(^|\.)youtube\.com$/.test(h)){
+    let id=u.searchParams.get('v')||'';
+    const m=u.pathname.match(/^\/(?:shorts|embed|live|v)\/([\w-]{11})/);
+    if(!id&&m)id=m[1];
+    if(/^[\w-]{11}$/.test(id))return {kind:'youtube',id};
+    const list=u.searchParams.get('list');
+    if(list&&/^[\w-]+$/.test(list))return {kind:'youtube',list};
+  }
+  if(h==='open.spotify.com'){
+    const m=u.pathname.match(/^\/(?:intl-[a-z-]+\/)?(?:embed\/)?(track|album|playlist|episode|show|artist)\/([A-Za-z0-9]+)/);
+    if(m)return {kind:'spotify',type:m[1],id:m[2]};
+  }
+  return null;
+}
+const embedOf=t=>{
+  if(!t||t.type!=='link')return null;
+  if(t.embed)return t.embed;
+  try{return parseEmbed(new URL(t.url));}catch(e){return null;}
+};
+const isEmbed=t=>!!embedOf(t);
+function embedSrc(e){
+  if(e.kind==='youtube'){
+    const q='autoplay=1&rel=0&playsinline=1';
+    const base='https://www.youtube-nocookie.com/embed/';
+    return e.id?base+e.id+'?'+q:base+'videoseries?list='+e.list+'&'+q;
+  }
+  return 'https://open.spotify.com/embed/'+e.type+'/'+e.id+'?utm_source=generator&theme=0';
+}
+async function fetchEmbedMeta(emb){
+  const canon=emb.kind==='youtube'
+    ?(emb.id?'https://www.youtube.com/watch?v='+emb.id:'https://www.youtube.com/playlist?list='+emb.list)
+    :'https://open.spotify.com/'+emb.type+'/'+emb.id;
+  const ep=emb.kind==='youtube'?'https://www.youtube.com/oembed?format=json&url=':'https://open.spotify.com/oembed?url=';
+  try{
+    const r=await jfetch(ep+encodeURIComponent(canon),8000);
+    if(!r.ok)return null;
+    const j=await r.json();
+    return {title:String(j.title||'').trim(),artist:String(j.author_name||'').trim(),thumb:String(j.thumbnail_url||'')};
+  }catch(e){return null;}
+}
+function mountEmbed(t,em){
+  const host=$('#embedHost');
+  $('#embedOpen').href=t.url||'#';
+  if(embedFor===t.id&&host.firstChild)return;
+  unmountEmbed();
+  const f=document.createElement('iframe');
+  f.src=embedSrc(em);
+  f.allow='autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture';
+  f.referrerPolicy='strict-origin-when-cross-origin';
+  f.title=t.title||'stream';
+  if(em.kind==='youtube'){f.className='youtube';f.allowFullscreen=true;}
+  else f.style.height=(em.type==='track'||em.type==='episode')?'152px':'352px';
+  host.append(f);embedFor=t.id;
+}
+function unmountEmbed(){const h=$('#embedHost');if(h)h.textContent='';embedFor=null;}
+function playEmbed(t){
+  audio.pause();
+  cur=t.id;
+  setNow(t);markCurrent();
+  if(boxOpen)fillBox();
+}
 
 /* ---------- saving ---------- */
 async function saveFromUrl(raw,title,artist){
@@ -472,8 +543,22 @@ async function saveFromUrl(raw,title,artist){
 
   const plat=platformOf(u);
   if(plat){
-    const id=await addTrack({type:'link',title:title||plat+' // '+nameFromUrl(u),artist:artist||'',url:u.href,size:0,duration:null,added:Date.now(),cover:null,coverV:0,lyrics:'',synced:false,lyricsSrc:''},null);
-    log(plat+' does not allow direct downloads. Saved as an ONLINE-ONLY link (needs internet to open).','warn');
+    const emb=parseEmbed(u);
+    let info=null,cover=null,remote='';
+    if(emb){
+      prog(10,'READING LINK');
+      info=await fetchEmbedMeta(emb);
+      const th=(emb.kind==='youtube'&&emb.id)?'https://i.ytimg.com/vi/'+emb.id+'/mqdefault.jpg':((info&&info.thumb)||'');
+      if(th&&/^https:\/\/[^"')\s]+$/.test(th)){
+        remote=th;
+        try{const r=await jfetch(th,8000);if(r.ok){const b=await thumb(await r.blob());if(b)cover=b;}}catch(e){}
+      }
+    }
+    const fb=emb?(emb.kind==='youtube'?'YouTube video':'Spotify '+emb.type):plat+' // '+nameFromUrl(u);
+    const id=await addTrack({type:'link',title:title||(info&&info.title)||fb,artist:artist||(info&&info.artist)||'',url:u.href,size:0,duration:null,added:Date.now(),
+      cover,coverV:cover?Date.now():0,coverRemote:cover?'':remote,lyrics:'',synced:false,lyricsSrc:'',embed:emb||null},null);
+    if(emb)log(plat+' audio can\'t be saved offline. Saved as a STREAM: it plays inside the music box while you are online.'+((info&&info.title)?'':' (Title not found, use EDIT in the music box to rename it.)'),'warn');
+    else log(plat+' does not allow direct downloads. Saved as an ONLINE-ONLY link (needs internet to open).','warn');
     return id;
   }
 
@@ -558,17 +643,20 @@ function render(){
     m.append(document.createTextNode(meta.join('  •  ')));
     if(t.lyrics){m.append(document.createTextNode('  •  '));m.append(el('i',null,'LYRICS'));}
     info.append(m);
-    const tag=el('span','tag'+(t.type==='link'?' link':''),t.type==='link'?'ONLINE LINK':'OFFLINE');
+    const tag=el('span','tag'+(t.type==='link'?' link':''),t.type==='link'?(embedOf(t)?'STREAM':'ONLINE LINK'):'OFFLINE');
     const del=el('button','del','✕');del.title='Delete';del.setAttribute('aria-label','Delete '+(t.title||'track'));
     del.addEventListener('click',async ev=>{
       ev.stopPropagation();
       if(!confirm('Delete "'+(t.title||'track')+'" from the vault?'))return;
-      if(cur===t.id){audio.pause();audio.removeAttribute('src');cur=null;setNow(null);if(boxOpen)closeBox();}
+      if(cur===t.id){audio.pause();audio.removeAttribute('src');cur=null;unmountEmbed();setNow(null);if(boxOpen)closeBox();}
       await removeTrack(t.id);dropCover(t.id);tracks=await allTracks();render();updateStorage();log('deleted '+(t.title||'track'));
     });
     row.append(th,info,tag,del);
     const open=async()=>{
-      if(t.type==='link'){window.open(t.url,'_blank','noopener');log('opening link (online only): '+(t.title||t.url),'warn');return;}
+      if(t.type==='link'){
+        if(embedOf(t)){if(cur!==t.id)playEmbed(t);openBox();return;}
+        window.open(t.url,'_blank','noopener');log('opening link (online only): '+(t.title||t.url),'warn');return;
+      }
       if(cur===t.id){openBox();if(audio.paused)audio.play().catch(()=>{});return;}
       await play(t.id);openBox();
     };
@@ -670,14 +758,21 @@ function hiLine(force){
   }
 }
 function fillBox(){
-  const t=curTrack();
+  const t=curTrack(),em=embedOf(t);
   paintArt($('#boxArt'),t);
   $('#boxTitle').textContent=t?(t.title||'untitled'):'';
   $('#boxArtist').textContent=t?(t.artist||'unknown artist'):'';
   lstat('');
   closeEdit();
-  renderLyrics(t);
-  hiLine(true);
+  $('#bFind').hidden=!!em;
+  $('#lhTitle').textContent=em?'// STREAM':'// LYRICS';
+  if(em){
+    $('#lsrc').textContent=(em.kind==='youtube'?'YOUTUBE':'SPOTIFY')+' \u00B7 ONLINE ONLY';
+    mountEmbed(t,em);
+  }else{
+    renderLyrics(t);
+    hiLine(true);
+  }
 }
 function openBox(){
   if(cur==null||!curTrack())return;
@@ -716,13 +811,13 @@ $('#bFind').addEventListener('click',async()=>{
 });
 
 /* edit form */
-function closeEdit(){$('#editForm').hidden=true;$('#lyr').hidden=false;editCover=undefined;}
+function closeEdit(){const em=isEmbed(curTrack());$('#editForm').hidden=true;$('#lyr').hidden=em;$('#embed').hidden=!em;editCover=undefined;}
 function openEdit(){
   const t=curTrack();if(!t)return;
   $('#eTitle').value=t.title||'';$('#eArtist').value=t.artist||'';$('#eLyrics').value=t.lyrics||'';
   editCover=undefined;$('#eCoverName').textContent=t.cover?'Current cover kept':'No cover yet';
   $('#eCover').value='';
-  $('#lyr').hidden=true;$('#editForm').hidden=false;lstat('');
+  $('#lyr').hidden=true;$('#embed').hidden=true;$('#editForm').hidden=false;lstat('');
 }
 $('#bEdit').addEventListener('click',openEdit);
 $('#eCancel').addEventListener('click',closeEdit);
@@ -755,7 +850,7 @@ $('#editForm').addEventListener('submit',async e=>{
 /* ---------- playback ---------- */
 function setNow(t){
   $('#npTitle').textContent=t?(t.title||'untitled'):'NO SIGNAL';
-  $('#npSub').textContent=t?((t.artist||'unknown artist')+'  •  tap for lyrics'):'select a track from the vault';
+  $('#npSub').textContent=t?((t.artist||'unknown artist')+'  \u2022  '+(embedOf(t)?'online stream \u2022 tap to open':'tap for lyrics')):'select a track from the vault';
   $('#tDur').textContent=t?fmtT(t.duration):'0:00';
   paintArt($('#npArt'),t);
   if(!t){$('#seek').value=0;$('#seek').style.setProperty('--p','0%');$('#tCur').textContent='0:00';}
@@ -776,9 +871,13 @@ function mediaSession(t){
 }
 async function play(id){
   const t=tracks.find(x=>x.id===id);if(!t)return;
-  if(t.type==='link'){window.open(t.url,'_blank','noopener');log('opening link (online only): '+(t.title||t.url),'warn');return;}
+  if(t.type==='link'){
+    if(embedOf(t)){playEmbed(t);return;}
+    window.open(t.url,'_blank','noopener');log('opening link (online only): '+(t.title||t.url),'warn');return;
+  }
   const blob=await getBlob(id);
   if(!blob){log('audio data missing for this track','err');return;}
+  unmountEmbed();
   if(objUrl)URL.revokeObjectURL(objUrl);
   objUrl=URL.createObjectURL(blob);
   audio.src=objUrl;cur=id;
@@ -789,6 +888,7 @@ async function play(id){
 }
 function toggle(){
   if(cur==null){if(queue.length)play(queue[0]);return;}
+  if(isEmbed(curTrack())){toggleBox();return;}
   audio.paused?audio.play():audio.pause();
 }
 function step(dir,auto){
