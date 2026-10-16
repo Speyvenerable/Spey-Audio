@@ -261,8 +261,17 @@ input[type=range]::-moz-range-thumb{width:10px;height:16px;background:var(--mag)
   *,*::before,*::after{animation:none!important;transition:none!important}
 }
 
-/* streams (YouTube / Spotify embeds) */
+/* online songs (YouTube / Spotify players shown in the music box) */
 .lh em{font-style:normal}
-#embed{flex:1;min-height:0;overflow-y:auto;margin-top:8px}
-#embedHost iframe{display:block;width:100%;border:1px solid #20304f;background:#000}
-#embedHost iframe.youtube{aspect-ratio:16/9;height:auto}
+#embed{width:100%;max-width:340px;align-self:center}
+#embedHost{position:relative;border:1px solid var(--cyan);background:#000;box-shadow:0 0 0 1px rgba(0,240,255,.15),0 0 28px rgba(0,240,255,.18)}
+#embedHost.yt{aspect-ratio:16/9}
+#embedHost.yt iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+#embedHost.sp iframe{display:block;width:100%;border:0}
+#embed .note{margin-top:8px;text-align:center}
+.side.embed #boxArt{display:none}
+@media(max-width:760px){
+  .side{flex-wrap:wrap}
+  .side.embed #boxArt{display:grid}
+  #embed{order:5;flex:1 1 100%;max-width:none;margin-right:-46px}
+}

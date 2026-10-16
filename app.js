@@ -52,7 +52,7 @@ async function removeTrack(id){
 
 /* ---------- state ---------- */
 let tracks=[],queue=[],cur=null,objUrl=null,shuffle=false,repeat='off',busy=false,busyFind=false;
-let boxOpen=false,lyLines=[],lyEls=[],lyActive=-1,userScroll=0,editCover,embedFor=null;
+let boxOpen=false,lyLines=[],lyEls=[],lyActive=-1,userScroll=0,editCover,embedFor=null,ext=null,extTimer=0;
 const audio=$('#audio');
 const curTrack=()=>tracks.find(x=>x.id===cur)||null;
 
@@ -353,7 +353,7 @@ function parseLrc(text){
 const norm=s=>(s||'').normalize('NFKD').toLowerCase().replace(/[\(\[].*?[\)\]]/g,'').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 function guess(t){
   let ti=(t.title||'').replace(/^\s*\d{1,3}[\s._-]+(?=\D)/,'').trim(),ar=(t.artist||'').trim();
-  if(!ar){const m=ti.match(/^(.+?)\s+[-–—]\s+(.+)$/);if(m){ar=m[1].trim();ti=m[2].trim();}}
+  if(!ar||t.type==='link'){const m=ti.match(/^(.+?)\s+[-–—]\s+(.+)$/);if(m){ar=m[1].trim();ti=m[2].trim();}}
   ti=ti.replace(/\s*[\(\[](official|lyrics?|audio|video|hd|hq|mv|remaster).*?[\)\]]/ig,'').trim();
   return {ti,ar};
 }
@@ -379,7 +379,7 @@ async function fetchLyrics(t){
     const a=norm(c.trackName),b=norm(c.artistName);
     if(!(a&&nt&&(a.includes(nt)||nt.includes(a))))continue;
     if(na&&!(b.includes(na)||na.includes(b)))continue;
-    const dd=(isFinite(dur)&&c.duration)?Math.abs(c.duration-dur):0;
+    const dd=(Number.isFinite(dur)&&c.duration)?Math.abs(c.duration-dur):0;
     if(dd>8)continue;
     const s=(c.syncedLyrics?100:0)-dd;
     if(s>bs){bs=s;best=c;}
@@ -407,7 +407,7 @@ const autoOn=()=>{try{return localStorage.getItem('spey-auto')!=='0';}catch(e){r
 async function enrich(id,manual){
   const t=await getMeta(id);
   const res={found:[],netFail:false};
-  if(!t||t.type!=='audio')return res;
+  if(!t||(t.type!=='audio'&&!embedOf(t)))return res;
   const patch={};
   if(!t.lyrics||manual){
     try{
@@ -466,7 +466,7 @@ function paintArt(node,t){
 }
 function makeArt(cls,t){const d=el('div','art '+cls);d.innerHTML=NOTE;paintArt(d,t);return d;}
 
-/* ---------- YouTube / Spotify: official embedded players (online only) ---------- */
+/* ---------- YouTube / Spotify: official players, driven by the app's own player bar ---------- */
 function parseEmbed(u){
   const h=u.hostname.toLowerCase().replace(/^www\./,'');
   if(h==='youtu.be'){
@@ -513,25 +513,143 @@ async function fetchEmbedMeta(emb){
     return {title:String(j.title||'').trim(),artist:String(j.author_name||'').trim(),thumb:String(j.thumbnail_url||'')};
   }catch(e){return null;}
 }
-function mountEmbed(t,em){
-  const host=$('#embedHost');
-  $('#embedOpen').href=t.url||'#';
-  if(embedFor===t.id&&host.firstChild)return;
-  unmountEmbed();
+
+/* one clock for the whole app: the player's, or the local audio element's */
+function curTime(){return ext?ext.time():audio.currentTime;}
+function seekTo(s){if(ext)ext.seek(s);else audio.currentTime=s;}
+function uiPlaying(p){
+  $('#bPlay').innerHTML=p?ICON_PAUSE:ICON_PLAY;
+  document.body.classList.toggle('playing',p);
+}
+function extTick(){
+  if(!ext)return;
+  const ct=ext.time(),d=ext.dur();
+  $('#tCur').textContent=fmtT(ct);
+  if(d>0){
+    $('#tDur').textContent=fmtT(d);
+    if(!dragging){const p=Math.min(1000,ct/d*1000);seek.value=p;seek.style.setProperty('--p',(p/10)+'%');}
+  }
+  hiLine(false);
+}
+function onExtEnded(){
+  if(repeat==='one'&&ext){ext.seek(0);ext.play();return;}
+  step(1,true);
+}
+let ytP=null,spP=null;
+function ytReady(){
+  if(window.YT&&window.YT.Player)return Promise.resolve(window.YT);
+  if(ytP)return ytP;
+  ytP=new Promise((res,rej)=>{
+    const prev=window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady=()=>{try{if(prev)prev();}catch(e){}res(window.YT);};
+    const s=document.createElement('script');s.src='https://www.youtube.com/iframe_api';
+    s.onerror=()=>rej(new Error('yt api'));document.head.append(s);
+    setTimeout(()=>rej(new Error('yt api timeout')),10000);
+  }).catch(e=>{ytP=null;throw e;});
+  return ytP;
+}
+function spReady(){
+  if(spP)return spP;
+  spP=new Promise((res,rej)=>{
+    window.onSpotifyIframeApiReady=api=>res(api);
+    const s=document.createElement('script');s.src='https://open.spotify.com/embed/iframe-api/v1';s.async=true;
+    s.onerror=()=>rej(new Error('spotify api'));document.head.append(s);
+    setTimeout(()=>rej(new Error('spotify api timeout')),10000);
+  }).catch(e=>{spP=null;throw e;});
+  return spP;
+}
+function stopExt(){
+  clearInterval(extTimer);extTimer=0;
+  if(ext){try{ext.destroy();}catch(e){}ext=null;}
+}
+function unmountEmbed(){stopExt();const h=$('#embedHost');if(h)h.textContent='';embedFor=null;}
+/* plain iframe: used only if the player API can't be loaded (then the player's own buttons are used) */
+function fallbackIframe(slot,em,title,myId){
+  if(embedFor!==myId)return;
   const f=document.createElement('iframe');
   f.src=embedSrc(em);
   f.allow='autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture';
   f.referrerPolicy='strict-origin-when-cross-origin';
-  f.title=t.title||'stream';
-  if(em.kind==='youtube'){f.className='youtube';f.allowFullscreen=true;}
+  f.title=title||'player';
+  if(em.kind==='youtube')f.allowFullscreen=true;
   else f.style.height=(em.type==='track'||em.type==='episode')?'152px':'352px';
-  host.append(f);embedFor=t.id;
+  slot.replaceWith(f);
 }
-function unmountEmbed(){const h=$('#embedHost');if(h)h.textContent='';embedFor=null;}
+function mountEmbed(t,em){
+  const host=$('#embedHost'),myId=t.id;
+  $('#embedOpen').href=t.url||'#';
+  $('#embedNote').textContent=em.kind==='spotify'
+    ?'Plays from Spotify and needs internet. Spotify may only play a 30-second preview unless you are logged in to Spotify in this browser.'
+    :'Plays from YouTube and needs internet.';
+  if(embedFor===myId&&host.firstChild)return;
+  unmountEmbed();
+  embedFor=myId;
+  host.className=em.kind==='youtube'?'yt':'sp';
+  const slot=document.createElement('div');host.append(slot);
+  if(em.kind==='youtube'){
+    ytReady().then(YT=>{
+      if(embedFor!==myId)return;
+      const vars={autoplay:1,rel:0,playsinline:1};
+      if(/^https?:/.test(location.origin))vars.origin=location.origin;
+      const opt={host:'https://www.youtube-nocookie.com',width:'100%',height:'100%',playerVars:vars,events:{}};
+      if(em.id)opt.videoId=em.id;else{vars.listType='playlist';vars.list=em.list;}
+      const x={kind:'youtube',paused:true};
+      opt.events.onReady=()=>{try{p.setVolume(Math.round(audio.volume*100));}catch(e){}};
+      opt.events.onStateChange=e=>{
+        const s=e.data;
+        if(s===1){x.paused=false;uiPlaying(true);}
+        else if(s===2){x.paused=true;uiPlaying(false);}
+        else if(s===0){x.paused=true;uiPlaying(false);onExtEnded();}
+      };
+      opt.events.onError=e=>{lstat('YouTube would not play this video here (code '+e.data+'). Try "Open the original".');};
+      const p=new YT.Player(slot,opt);
+      x.play=()=>{try{p.playVideo();}catch(e){}};
+      x.pause=()=>{try{p.pauseVideo();}catch(e){}};
+      x.seek=s=>{try{p.seekTo(s,true);}catch(e){}};
+      x.setVol=v=>{try{p.setVolume(Math.round(v*100));}catch(e){}};
+      x.time=()=>{try{return p.getCurrentTime()||0;}catch(e){return 0;}};
+      x.dur=()=>{try{return p.getDuration()||0;}catch(e){return 0;}};
+      x.destroy=()=>{try{p.destroy();}catch(e){}};
+      ext=x;extTimer=setInterval(extTick,250);
+      if(boxOpen&&cur===myId)renderLyrics(curTrack());
+    }).catch(()=>fallbackIframe(slot,em,t.title,myId));
+  }else{
+    spReady().then(api=>{
+      if(embedFor!==myId)return;
+      const h=(em.type==='track'||em.type==='episode')?152:352;
+      api.createController(slot,{width:'100%',height:h,uri:'spotify:'+em.type+':'+em.id},ctrl=>{
+        if(embedFor!==myId){try{ctrl.destroy();}catch(e){}return;}
+        const x={kind:'spotify',paused:true,pos:0,d:0,t0:Date.now(),endedFlag:false};
+        x.play=()=>{if(x.paused){try{ctrl.togglePlay();}catch(e){}}};
+        x.pause=()=>{if(!x.paused){try{ctrl.togglePlay();}catch(e){}}};
+        x.seek=s=>{try{ctrl.seek(s);}catch(e){}x.pos=s;x.t0=Date.now();};
+        x.setVol=()=>{};
+        x.time=()=>{const run=x.paused?0:(Date.now()-x.t0)/1000;return Math.min(x.d||1e9,x.pos+run);};
+        x.dur=()=>x.d;
+        x.destroy=()=>{try{ctrl.destroy();}catch(e){}};
+        ctrl.addListener('ready',()=>{try{ctrl.play();}catch(e){}});
+        ctrl.addListener('playback_update',ev=>{
+          const d=ev&&ev.data;if(!d)return;
+          x.pos=(d.position||0)/1000;x.d=(d.duration||0)/1000;x.t0=Date.now();
+          const was=x.paused;x.paused=!!d.isPaused;
+          if(was!==x.paused)uiPlaying(!x.paused);
+          const single=em.type==='track'||em.type==='episode';
+          if(single&&x.d>0&&x.pos>=x.d-.6&&x.paused&&!x.endedFlag){x.endedFlag=true;onExtEnded();}
+          else if(x.pos<x.d-2)x.endedFlag=false;
+        });
+        ext=x;extTimer=setInterval(extTick,250);
+        if(boxOpen&&cur===myId)renderLyrics(curTrack());
+      });
+    }).catch(()=>fallbackIframe(slot,em,t.title,myId));
+  }
+}
 function playEmbed(t){
   audio.pause();
+  const em=embedOf(t);
   cur=t.id;
+  seek.value=0;seek.style.setProperty('--p','0%');$('#tCur').textContent='0:00';
   setNow(t);markCurrent();
+  mountEmbed(t,em);
   if(boxOpen)fillBox();
 }
 
@@ -557,7 +675,7 @@ async function saveFromUrl(raw,title,artist){
     const fb=emb?(emb.kind==='youtube'?'YouTube video':'Spotify '+emb.type):plat+' // '+nameFromUrl(u);
     const id=await addTrack({type:'link',title:title||(info&&info.title)||fb,artist:artist||(info&&info.artist)||'',url:u.href,size:0,duration:null,added:Date.now(),
       cover,coverV:cover?Date.now():0,coverRemote:cover?'':remote,lyrics:'',synced:false,lyricsSrc:'',embed:emb||null},null);
-    if(emb)log(plat+' audio can\'t be saved offline. Saved as a STREAM: it plays inside the music box while you are online.'+((info&&info.title)?'':' (Title not found, use EDIT in the music box to rename it.)'),'warn');
+    if(emb)log(plat+' added like a normal song and tagged ONLINE: it plays from '+plat+' and needs internet (the audio itself can\'t be saved offline).'+((info&&info.title)?'':' (Title not found, use EDIT in the music box to rename it.)'),'warn');
     else log(plat+' does not allow direct downloads. Saved as an ONLINE-ONLY link (needs internet to open).','warn');
     return id;
   }
@@ -621,7 +739,7 @@ function render(){
   const q=$('#search').value.trim().toLowerCase();
   const list=$('#list');list.textContent='';
   const vis=tracks.filter(t=>!q||((t.title||'')+' '+(t.artist||'')).toLowerCase().includes(q));
-  queue=vis.filter(t=>t.type==='audio').map(t=>t.id);
+  queue=vis.filter(t=>t.type==='audio'||embedOf(t)).map(t=>t.id);
   $('#count').textContent=tracks.length+(tracks.length===1?' TRACK':' TRACKS');
   $('#vaultCount').textContent=tracks.length;
   if(!vis.length){
@@ -639,11 +757,11 @@ function render(){
     info.append(el('div','t',t.title||'untitled'));
     const m=el('div','m');
     const meta=[t.artist||'unknown artist'];
-    if(t.type==='audio'){meta.push(fmtT(t.duration));meta.push(fmtB(t.size));}else meta.push(t.url?new URL(t.url).hostname:'link');
+    if(t.type==='audio'){meta.push(fmtT(t.duration));meta.push(fmtB(t.size));}else{const e0=embedOf(t);meta.push(e0?(e0.kind==='youtube'?'YouTube':'Spotify'):(t.url?new URL(t.url).hostname:'link'));}
     m.append(document.createTextNode(meta.join('  •  ')));
     if(t.lyrics){m.append(document.createTextNode('  •  '));m.append(el('i',null,'LYRICS'));}
     info.append(m);
-    const tag=el('span','tag'+(t.type==='link'?' link':''),t.type==='link'?(embedOf(t)?'STREAM':'ONLINE LINK'):'OFFLINE');
+    const tag=el('span','tag'+(t.type==='link'?' link':''),t.type==='link'?(embedOf(t)?'ONLINE':'ONLINE LINK'):'OFFLINE');
     const del=el('button','del','✕');del.title='Delete';del.setAttribute('aria-label','Delete '+(t.title||'track'));
     del.addEventListener('click',async ev=>{
       ev.stopPropagation();
@@ -703,9 +821,9 @@ function draw(){
   cx.clearRect(0,0,w,h);cx.fillStyle=grad;
   const n=56,bw=w/n;let live=false;
   if(an&&!audio.paused){if(!fdata||fdata.length!==an.frequencyBinCount)fdata=new Uint8Array(an.frequencyBinCount);an.getByteFrequencyData(fdata);live=true;}
-  const now=Date.now();
+  const now=Date.now(),xp=!!(ext&&!ext.paused);
   for(let i=0;i<n;i++){
-    const v=live?fdata[Math.floor(i*fdata.length*.78/n)]/255:.05+.03*Math.sin(now/500+i*.5);
+    const v=live?fdata[Math.floor(i*fdata.length*.78/n)]/255:(xp?.14+.3*Math.abs(Math.sin(now/230+i*.62)):.05+.03*Math.sin(now/500+i*.5));
     const bh=Math.max(2,v*h);
     cx.fillRect(i*bw+1,h-bh,Math.max(1,bw-2),bh);
   }
@@ -726,14 +844,14 @@ function renderLyrics(t){
     box.append(n);return;
   }
   $('#lsrc').textContent=(t.synced?'TIMED':'PLAIN')+' · '+(SRC[t.lyricsSrc]||'SAVED');
-  if(t.synced){
+  if(t.synced&&(!isEmbed(t)||ext)){
     lyLines=parseLrc(t.lyrics);
   }
   if(lyLines.length){
     box.classList.remove('flat');
     lyLines.forEach(l=>{
       const d=el('div','ly',l.x||'♪');
-      d.addEventListener('click',()=>{if(cur!=null){audio.currentTime=l.t;}});
+      d.addEventListener('click',()=>{if(cur!=null){seekTo(l.t);}});
       box.append(d);lyEls.push(d);
     });
   }else{
@@ -743,7 +861,7 @@ function renderLyrics(t){
 }
 function hiLine(force){
   if(!boxOpen||!lyLines.length)return;
-  const ct=audio.currentTime+.2;
+  const ct=curTime()+.2;
   let i=-1;
   for(let k=0;k<lyLines.length;k++){if(lyLines[k].t<=ct)i=k;else break;}
   if(i===lyActive&&!force)return;
@@ -755,6 +873,8 @@ function hiLine(force){
       const c=$('#lyr');
       c.scrollTo({top:e.offsetTop-c.clientHeight/2+e.offsetHeight/2,behavior:force?'auto':'smooth'});
     }
+  }else if(force&&lyEls[0]){
+    const c=$('#lyr');c.scrollTop=Math.max(0,lyEls[0].offsetTop-c.clientHeight*.3);
   }
 }
 function fillBox(){
@@ -764,15 +884,10 @@ function fillBox(){
   $('#boxArtist').textContent=t?(t.artist||'unknown artist'):'';
   lstat('');
   closeEdit();
-  $('#bFind').hidden=!!em;
-  $('#lhTitle').textContent=em?'// STREAM':'// LYRICS';
-  if(em){
-    $('#lsrc').textContent=(em.kind==='youtube'?'YOUTUBE':'SPOTIFY')+' \u00B7 ONLINE ONLY';
-    mountEmbed(t,em);
-  }else{
-    renderLyrics(t);
-    hiLine(true);
-  }
+  $('.side').classList.toggle('embed',!!em);
+  if(em)mountEmbed(t,em);
+  renderLyrics(t);
+  hiLine(true);
 }
 function openBox(){
   if(cur==null||!curTrack())return;
@@ -811,13 +926,13 @@ $('#bFind').addEventListener('click',async()=>{
 });
 
 /* edit form */
-function closeEdit(){const em=isEmbed(curTrack());$('#editForm').hidden=true;$('#lyr').hidden=em;$('#embed').hidden=!em;editCover=undefined;}
+function closeEdit(){const em=isEmbed(curTrack());$('#editForm').hidden=true;$('#lyr').hidden=false;$('#embed').hidden=!em;editCover=undefined;}
 function openEdit(){
   const t=curTrack();if(!t)return;
   $('#eTitle').value=t.title||'';$('#eArtist').value=t.artist||'';$('#eLyrics').value=t.lyrics||'';
   editCover=undefined;$('#eCoverName').textContent=t.cover?'Current cover kept':'No cover yet';
   $('#eCover').value='';
-  $('#lyr').hidden=true;$('#embed').hidden=true;$('#editForm').hidden=false;lstat('');
+  $('#lyr').hidden=true;$('#editForm').hidden=false;lstat('');
 }
 $('#bEdit').addEventListener('click',openEdit);
 $('#eCancel').addEventListener('click',closeEdit);
@@ -850,7 +965,7 @@ $('#editForm').addEventListener('submit',async e=>{
 /* ---------- playback ---------- */
 function setNow(t){
   $('#npTitle').textContent=t?(t.title||'untitled'):'NO SIGNAL';
-  $('#npSub').textContent=t?((t.artist||'unknown artist')+'  \u2022  '+(embedOf(t)?'online stream \u2022 tap to open':'tap for lyrics')):'select a track from the vault';
+  $('#npSub').textContent=t?((t.artist||'unknown artist')+'  \u2022  tap for lyrics'):'select a track from the vault';
   $('#tDur').textContent=t?fmtT(t.duration):'0:00';
   paintArt($('#npArt'),t);
   if(!t){$('#seek').value=0;$('#seek').style.setProperty('--p','0%');$('#tCur').textContent='0:00';}
@@ -888,7 +1003,10 @@ async function play(id){
 }
 function toggle(){
   if(cur==null){if(queue.length)play(queue[0]);return;}
-  if(isEmbed(curTrack())){toggleBox();return;}
+  if(isEmbed(curTrack())){
+    if(ext){ext.paused?ext.play():ext.pause();}else toggleBox();
+    return;
+  }
   audio.paused?audio.play():audio.pause();
 }
 function step(dir,auto){
@@ -899,12 +1017,12 @@ function step(dir,auto){
   let j=i+dir;
   if(j>=queue.length){
     if(repeat==='all'||!auto)j=0;
-    else{audio.pause();audio.currentTime=0;return;}
+    else{if(ext)ext.pause();else{audio.pause();audio.currentTime=0;}return;}
   }
   if(j<0)j=queue.length-1;
   play(queue[j]);
 }
-function prev(){if(audio.currentTime>3){audio.currentTime=0;}else step(-1,false);}
+function prev(){if(curTime()>3){seekTo(0);}else step(-1,false);}
 
 let dragging=false;
 const seek=$('#seek'),vol=$('#vol');
@@ -925,9 +1043,10 @@ seek.addEventListener('pointerdown',()=>dragging=true);
 seek.addEventListener('pointerup',()=>dragging=false);
 seek.addEventListener('input',()=>{
   seek.style.setProperty('--p',(seek.value/10)+'%');
-  if(isFinite(audio.duration))audio.currentTime=seek.value/1000*audio.duration;
+  const dd=ext?ext.dur():audio.duration;
+  if(isFinite(dd)&&dd>0)seekTo(seek.value/1000*dd);
 });
-function setVol(v){audio.volume=v;vol.style.setProperty('--p',(v*100)+'%');try{localStorage.setItem('spey-vol',v);}catch(e){}}
+function setVol(v){audio.volume=v;if(ext)ext.setVol(v);vol.style.setProperty('--p',(v*100)+'%');try{localStorage.setItem('spey-vol',v);}catch(e){}}
 vol.addEventListener('input',()=>setVol(+vol.value));
 $('#bPlay').addEventListener('click',toggle);
 $('#bNext').addEventListener('click',()=>step(1,false));
@@ -941,8 +1060,8 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Escape'&&boxOpen){closeBox();return;}
   if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
   if(e.code==='Space'){e.preventDefault();toggle();}
-  else if(e.code==='ArrowRight'&&cur!=null)audio.currentTime=Math.min(audio.duration||1e9,audio.currentTime+5);
-  else if(e.code==='ArrowLeft'&&cur!=null)audio.currentTime=Math.max(0,audio.currentTime-5);
+  else if(e.code==='ArrowRight'&&cur!=null)seekTo(curTime()+5);
+  else if(e.code==='ArrowLeft'&&cur!=null)seekTo(Math.max(0,curTime()-5));
 });
 
 /* ---------- inputs ---------- */
@@ -1014,7 +1133,7 @@ function measure(){document.documentElement.style.setProperty('--ph',$('.player'
   vol.value=v;setVol(v);
   setNow(null);
   net();sizeCv();measure();
-  window.addEventListener('resize',()=>{sizeCv();measure();});
+  window.addEventListener('resize',()=>{sizeCv();measure();if(boxOpen)hiLine(true);});
   if('ResizeObserver' in window)new ResizeObserver(measure).observe($('.player'));
   draw();
   log('SPEY//AUDIO online','ok');
